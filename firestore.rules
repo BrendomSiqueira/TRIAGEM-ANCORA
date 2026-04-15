@@ -1,0 +1,125 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: analysts
+    // Document ID: analystId
+    // Fields:
+    //   - name: string (required)
+    //   - email: string (required, email format)
+    //   - role: string (required, enum: ["Cadastro", "Contemplação", "Ambos"])
+    //
+    // Collection: clients
+    // Document ID: clientId
+    // Fields:
+    //   - name: string (required)
+    //   - email: string (required)
+    //   - cpf: string (required)
+    //   - clientType: string (required, enum: ["PF", "PJ"])
+    //   - consortiumType: string (required)
+    //   - group: string (required)
+    //   - quota: string (required)
+    //   - analystName: string
+    //   - analystEmail: string
+    //   - progress: number (required, 0-100)
+    //   - requiredDocumentTypes: list (required)
+    //   - lastUpdate: string
+    //   ... and other optional fields
+    //
+    // Collection: clients/{clientId}/documents
+    // Document ID: docId
+    // Fields:
+    //   - type: string (required)
+    //   - status: string (required, enum: ["PENDING", "UPLOADED", "REJECTED"])
+    //   - fileName: string
+    //   - fileData: string (base64)
+    //   - uploadDate: string
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isRootAdmin() {
+      return isAuthenticated() && request.auth.token.email == "brendomsiqueira96@gmail.com";
+    }
+
+    function isAnalyst() {
+      return isAuthenticated() && 
+        (isRootAdmin() || exists(/databases/$(database)/documents/analysts/$(request.auth.uid)));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Domain Validators
+    function isValidAnalyst(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             isValidEmail(data.email) &&
+             data.role in ["Cadastro", "Contemplação", "Ambos"];
+    }
+
+    function isValidClient(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.cpf is string &&
+             data.clientType in ["PF", "PJ"] &&
+             data.progress is number && data.progress >= 0 && data.progress <= 100 &&
+             data.requiredDocumentTypes is list;
+    }
+
+    function isValidDocument(data) {
+      return data.type is string &&
+             data.status in ["PENDING", "UPLOADED", "REJECTED"] &&
+             (!('fileData' in data) || (data.fileData is string && data.fileData.size() < 1048576));
+    }
+
+    // Rules
+    
+    // Analysts collection
+    match /analysts/{analystId} {
+      allow read: if isAuthenticated();
+      allow write: if isRootAdmin() && isValidAnalyst(request.resource.data);
+    }
+
+    // Clients collection
+    match /clients/{clientId} {
+      // Allow analysts to list all clients
+      allow list: if isAnalyst();
+      
+      // Allow anyone with the ID to get client info (for the portal)
+      allow get: if true;
+      
+      // Only analysts can create clients
+      allow create: if isAnalyst() && isValidClient(request.resource.data);
+      
+      // Allow analysts to update anything, or clients to update specific fields (progress, lastUpdate, etc.)
+      allow update: if isAnalyst() || (
+        // Client portal updates
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['progress', 'lastUpdate', 'uploadedDocumentTypes', 'totalDocsCount']) &&
+        isValidClient(request.resource.data)
+      );
+      
+      allow delete: if isAnalyst();
+
+      // Documents subcollection
+      match /documents/{docId} {
+        // Allow anyone with the clientId to read/create documents (for the portal)
+        allow read, create: if true && isValidDocument(request.resource.data);
+        
+        // Only analysts can update/delete documents
+        allow update, delete: if isAnalyst();
+      }
+    }
+  }
+}
